@@ -1,100 +1,171 @@
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <string.h>
+#include <errno.h>
+#include <signal.h>
+#include <unistd.h>
 #include <sys/time.h>
 
-#define MAX_BUFFER_SIZE 1024
+int changeCCAlgorithm(int socketfd, char* algo);
+int socketSetup(struct sockaddr_in *serverAddress, int port, char* algo, char* ip);
+int sendData(int clientSocket, void* buffer, int len);
+char* readFromFile(int* size);
+int authCheck(int socketfd);
 
-void error(const char *msg) {
-    perror(msg);
-    exit(1);
-}
+char *fileName = "tosend.txt";
+char *CC_reno = "reno";
+char *CC_cubic = "cubic";
 
 int main(int argc, char *argv[]) {
-    if (argc != 4 || strcmp(argv[1], "-a") != 0 || strcmp(argv[3], "-f") != 0) {
+    if (argc != 7) {
         fprintf(stderr, "Usage: %s -a <receiver_ip> -f <file_path>\n", argv[0]);
         exit(1);
     }
 
+    int port = atoi(argv[4]);
+    char *algorithm = argv[6];
     char *receiver_ip = argv[2];
-    char *file_path = argv[4];
 
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
-        error("ERROR opening socket");
+    char *fileContent = NULL;
+    int socketfd = -1, fileSize = 0;
+    struct sockaddr_in serverAddress;
 
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(atoi(argv[6])); // Assuming -p is used for port
+    printf("Sender starting\n");
+    fileContent = readFromFile(&fileSize);
 
-    if (inet_pton(AF_INET, receiver_ip, &server_addr.sin_addr) <= 0)
-        error("ERROR converting IP address");
+    socketfd = socketSetup(&serverAddress, port, algorithm, receiver_ip);
 
-    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
-        error("ERROR connecting");
-
-    printf("Connected to Receiver. Starting file transmission...\n");
-
-    FILE *file = fopen(file_path, "rb");
-    if (file == NULL)
-        error("ERROR opening file");
-
-    char buffer[MAX_BUFFER_SIZE];
-    size_t bytesRead;
-
-    // Send file
-    do {
-        bytesRead = fread(buffer, 1, sizeof(buffer), file);
-        if (bytesRead < 0)
-            error("ERROR reading from file");
-
-        if (send(sockfd, buffer, bytesRead, 0) < 0)
-            error("ERROR writing to socket");
-
-    } while (bytesRead > 0);
-
-    printf("File transmission complete.\n");
-
-    // User decision
-    char decision;
-    printf("Do you want to send the file again? (a for yes, any other key for no): ");
-    scanf(" %c", &decision);
-
-    while (decision == 'a') {
-        // Send 'a' to request additional runs
-        send(sockfd, &decision, sizeof(decision), 0);
-
-        // Send file again
-        rewind(file);  // Reset file pointer to the beginning
-        do {
-            bytesRead = fread(buffer, 1, sizeof(buffer), file);
-            if (bytesRead < 0)
-                error("ERROR reading from file");
-
-            if (send(sockfd, buffer, bytesRead, 0) < 0)
-                error("ERROR writing to socket");
-
-        } while (bytesRead > 0);
-
-        printf("File transmission complete.\n");
-
-        // User decision
-        printf("Do you want to send the file again? (a for yes, any other key for no): ");
-        scanf(" %c", &decision);
+    if (connect(socketfd, (struct sockaddr*) &serverAddress, sizeof(serverAddress)) == -1) {
+        perror("connect");
+        exit(1);
     }
 
-    // Send exit message
-    decision = 'e';
-    send(sockfd, &decision, sizeof(decision), 0);
+    printf("Connected successfully to the Receiver\n");
 
-    // Close the TCP connection
-    fclose(file);
-    close(sockfd);
+    // send the file size to the receiver
+    printf("Sending the size...\n");
+    sendData(socketfd, &fileSize, sizeof(int));
 
-    printf("Sender end.\n");
+    printf("Sending the data for the first time...\n");
+    sendData(socketfd, fileContent, fileSize);
+
+    while (true) {
+    int choice = -1, ret = EOF;
+    printf("Send the file again? (1 to resend, 0 to exit.) \n");
+    ret = scanf("%d", &choice);
+
+    while (ret != 1 || (choice != 1 && choice != 0)) {
+        scanf("%*s");
+        ret = scanf("%d", &choice);
+    }
+
+    if (!choice) {
+        // Send exit command to the receiver
+        char exitCommand = 'E';
+        sendData(socketfd, &exitCommand, sizeof(char));
+
+        printf("Exiting...\n");
+        break;
+    } else {
+        // Send resend command to the receiver
+        char resendCommand = 'R';
+        sendData(socketfd, &resendCommand, sizeof(char));
+    }
+
+    // Continue with sending file data
+    sendData(socketfd, fileContent, fileSize);
+}
+
+
+    close(socketfd);
+    free(fileContent);
+    printf("Sender exit.\n");
+    return 0;
+}
+
+int sendData(int socketfd, void* buffer, int len) {
+    int sentd = send(socketfd, buffer, len, 0);
+
+    if (sentd == -1) {
+        perror("send");
+        exit(1);
+    } else if (!sentd)
+        printf("Receiver doesn't accept requests.\n");
+    else if (sentd < len)
+        printf("Data was only partly send (%d/%d bytes).\n", sentd, len);
+    
+    return sentd;
+}
+
+int socketSetup(struct sockaddr_in *serverAddress, int port, char* algo, char* ip) {
+    int socketfd = -1;
+
+    memset(serverAddress, 0, sizeof(*serverAddress));
+    serverAddress->sin_family = AF_INET;
+    serverAddress->sin_port = htons(port);
+
+    if (inet_pton(AF_INET, (const char*) ip, &serverAddress->sin_addr) == -1) {
+        perror("inet_pton()");
+        exit(1);
+    }
+
+    if ((socketfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+        perror("socket()");
+        exit(1);
+    }
+
+    changeCCAlgorithm(socketfd, algo);
+
+    return socketfd;
+}
+
+int changeCCAlgorithm(int socketfd, char* algo) {
+    if (strcmp(algo, "reno") == 0) {
+        socklen_t CC_reno_len = strlen("reno");
+
+        if (setsockopt(socketfd, IPPROTO_TCP, 13, "reno", CC_reno_len) != 0) {
+            perror("setsockopt");
+            exit(1);
+        }
+    } else {
+        socklen_t CC_cubic_len = strlen("cubic");
+
+        if (setsockopt(socketfd, IPPROTO_TCP, 13, "cubic", CC_cubic_len) != 0) {
+            perror("setsockopt");
+            exit(1);
+        }
+    }
 
     return 0;
+}
+
+char* readFromFile(int* size) {
+    FILE *fpointer = NULL;
+    char* fileContent;
+
+    fpointer = fopen(fileName, "r");
+
+    if (fpointer == NULL) {
+        perror("fopen");
+        exit(1);
+    }
+
+    // Find the file size and allocate enough memory for it.
+    fseek(fpointer, 0L, SEEK_END);
+    *size = (int) ftell(fpointer);
+    fileContent = (char*) malloc(*size * sizeof(char));
+    fseek(fpointer, 0L, SEEK_SET);
+
+    fread(fileContent, sizeof(char), *size, fpointer);
+    fclose(fpointer);
+
+    printf("File \"%s\" total size is %d bytes.\n", fileName, *size);
+
+    return fileContent;
 }
