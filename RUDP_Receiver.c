@@ -9,10 +9,9 @@ struct RunStatistics {
 };
 
 void printStatistics(struct RunStatistics* statistics, int numRuns);
-void calcTime(int fileSize,struct timeval start,  struct RunStatistics *runStatistics, int numRuns);
-char *getBuffer(int *fileSize, RUDPSocket *receiverSocket);
+void calcTime(int fileSize, struct timeval start, struct RunStatistics* runStatistics, int numRuns);
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     if (argc != 3) {
         fprintf(stderr, "Usage: %s -p <port>\n", argv[0]);
         return EXIT_FAILURE;
@@ -21,37 +20,32 @@ int main(int argc, char *argv[]) {
     // Parse command line arguments
     int port = atoi(argv[2]);
 
-    // array for the times 
+    // array for the times
     struct RunStatistics runStatistics[MAX_RUNS];
     int numRuns = 0;
 
     // Create a RUDP receiver
-    RUDPSocket *receiver_socket = rudp_socket();
+    RUDP_Socket* receiver_socket = rudp_socket(true, port); // Server socket
     if (receiver_socket == NULL) {
         perror("Error creating RUDP socket for receiver");
         return EXIT_FAILURE;
     }
 
-    // Bind to the specified port
-    struct sockaddr_in receiver_addr;
-    memset(&receiver_addr, 0, sizeof(receiver_addr));
-    receiver_addr.sin_family = AF_INET;
-    receiver_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    receiver_addr.sin_port = htons(port);
-
-    if (bind(receiver_socket->sockfd, (struct sockaddr *)&receiver_addr, sizeof(receiver_addr)) == -1) {
-        perror("Error binding RUDP socket");
-        rudp_close(receiver_socket);
-        return EXIT_FAILURE;
-    }
-    int fileSize;
-    char *buffer = getBuffer(&fileSize, receiver_socket);
     printf("Starting Receiver...\n");
 
     struct timeval start;
-    struct timeval end;
     gettimeofday(&start, NULL);  // Initialize start time
-    
+
+    // Accept incoming connection
+    if (rudp_accept(receiver_socket) == 0) {
+        perror("Error accepting connection");
+        rudp_close(receiver_socket);
+        return EXIT_FAILURE;
+    }
+
+    int fileSize;
+    char* buffer = getBuffer(&fileSize, receiver_socket);
+
     // Main loop to receive data and sender response
     while (1) {
         // Receive the packet using the RUDP socket
@@ -62,17 +56,9 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        // Send acknowledgment
-        int sendResult = rudp_send(receiver_socket, "ACK", 4); 
-
-
-        if (sendResult == -1) {
-            fprintf(stderr, "Error sending acknowledgment\n");
-            break;
-        }
         // calc the time for the packet
-         calcTime(fileSize,start, runStatistics, numRuns);
-         numRuns++;
+        calcTime(fileSize, start, runStatistics, numRuns);
+        numRuns++;
 
         // Check for sender's decision
         char senderDecision;
@@ -91,25 +77,19 @@ int main(int argc, char *argv[]) {
             printf("Sender is sending again\n");
         }
     }
-    
-    
+
     printf("Receiver End\n");
 
     // Print statistics after receiving the exit message
     printf("----------------------------------\n");
     printf("- * Statistics * -\n");
-    for (int i = 0; i < numRuns; i++) {
-        printf("- Run #%d Data: Time=%.2fms; Speed=%.2fMB/s\n", i + 1, runStatistics[i].time, runStatistics[i].speed);
-    }
     printStatistics(runStatistics, numRuns);
     printf("----------------------------------\n");
 
-
-    // Cleanup 
+    // Cleanup
     free(buffer);
     rudp_close(receiver_socket);
 
-    
     return 0;
 }
 
@@ -129,7 +109,7 @@ void printStatistics(struct RunStatistics* statistics, int numRuns) {
 }
 
 // Function to dynamically allocate a buffer for the data
-char *getBuffer(int *fileSize, RUDPSocket *receiverSocket) {
+char* getBuffer(int* fileSize, RUDP_Socket* receiverSocket) {
     // Receive the file size from the sender
     int recvSizeResult = rudp_recv(receiverSocket, fileSize, sizeof(int));
 
@@ -139,7 +119,7 @@ char *getBuffer(int *fileSize, RUDPSocket *receiverSocket) {
     }
 
     // Dynamically allocate a buffer for the data
-    char *buffer = (char *)malloc(*fileSize);
+    char* buffer = (char*)malloc(*fileSize);
     if (buffer == NULL) {
         perror("Error allocating memory for buffer");
         return NULL;
@@ -149,8 +129,7 @@ char *getBuffer(int *fileSize, RUDPSocket *receiverSocket) {
 }
 
 // Function to calculate and store statistics
-void calcTime(int fileSize,struct timeval start,  struct RunStatistics *runStatistics, int numRuns) {
-
+void calcTime(int fileSize, struct timeval start, struct RunStatistics* runStatistics, int numRuns) {
     struct timeval end;
     gettimeofday(&end, NULL);
     double elapsedTime = (end.tv_sec - start.tv_sec) * 1000.0;  // Convert to milliseconds
