@@ -94,11 +94,13 @@ uint16_t calculate_checksum(const void* data, size_t length) {
         perror("Error allocating memory for RUDP packet");
         return -1;
     }
-    header.checksum = calculate_checksum(packet, packet_size);
 
     // Copy the header and data into the packet buffer
     memcpy(packet, &header, sizeof(RUDPHeader));
     memcpy(packet + sizeof(RUDPHeader), data, length);
+    
+    // calc checksum by the packet and packet size
+    header.checksum = calculate_checksum(packet, packet_size);
 
     int attempt = 0;
     const int max_attempts = 3; // Number of retransmission attempts
