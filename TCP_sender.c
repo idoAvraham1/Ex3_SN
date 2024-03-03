@@ -12,35 +12,48 @@
 #include <unistd.h>
 #include <sys/time.h>
 
-int changeCCAlgorithm(int socketfd, char* algo);
-int socketSetup(struct sockaddr_in *serverAddress, int port, char* algo, char* ip);
-int sendData(int clientSocket, void* buffer, int len);
-char* readFromFile(int* size);
-int authCheck(int socketfd);
+// Function to set the congestion control algorithm for the socket
+int SetCCAlgorithm(int socketfd, char* algo);
 
+// Function to set up the socket and return the socket file descriptor
+int socketSetup(struct sockaddr_in *serverAddress, int port, char* algo, char* ip);
+
+// Function to send data through the socket
+int sendData(int clientSocket, void* buffer, int len);
+
+// Function to read content from a file and return it along with its size
+char* readFromFile(int* size);
+
+// Global variables
 char *fileName = "tosend.txt";
-char *CC_reno = "reno";
-char *CC_cubic = "cubic";
 
 int main(int argc, char *argv[]) {
+    // Check command line arguments
     if (argc != 7) {
         fprintf(stderr, "Usage: %s -a <receiver_ip> -f <file_path>\n", argv[0]);
         exit(1);
     }
 
+    // Parse command line arguments
     int port = atoi(argv[4]);
     char *algorithm = argv[6];
     char *receiver_ip = argv[2];
 
+    // File-related variables
     char *fileContent = NULL;
-    int socketfd = -1, fileSize = 0;
+    int fileSize = 0;
+
+    // Socket and address variables
+    int socketfd = -1;
     struct sockaddr_in serverAddress;
 
     printf("Sender starting\n");
     fileContent = readFromFile(&fileSize);
 
+    // Set up the socket and establish connection
     socketfd = socketSetup(&serverAddress, port, algorithm, receiver_ip);
 
+    // Connect to the receiver
     if (connect(socketfd, (struct sockaddr*) &serverAddress, sizeof(serverAddress)) == -1) {
         perror("connect");
         exit(1);
@@ -48,21 +61,23 @@ int main(int argc, char *argv[]) {
 
     printf("Connected successfully to the Receiver\n");
 
-    // send the file size to the receiver
+    // Send the file size to the receiver
     printf("Sending the size...\n");
     sendData(socketfd, &fileSize, sizeof(int));
 
+    // Send the file data for the first time
     printf("Sending the data for the first time...\n");
     sendData(socketfd, fileContent, fileSize);
 
+    // Loop to handle user prompts for resending or exiting
     while (true) {
-    int choice = -1, ret = EOF;
+    int choice = -1;
     printf("Send the file again? (1 to resend, 0 to exit.) \n");
-    ret = scanf("%d", &choice);
 
-    while (ret != 1 || (choice != 1 && choice != 0)) {
-        scanf("%*s");
-        ret = scanf("%d", &choice);
+    // Scan until a valid choice (0 or 1) is provided
+    while (scanf("%d", &choice) != 1 || (choice != 0 && choice != 1)) {
+        scanf("%*s");  // Discard invalid input
+        printf("Invalid choice. Please enter 0 to exit or 1 to resend.\n");
     }
 
     if (!choice) {
@@ -80,11 +95,15 @@ int main(int argc, char *argv[]) {
 
     // Continue with sending file data
     sendData(socketfd, fileContent, fileSize);
-}
+   }
 
 
+     // Close the socket
     close(socketfd);
+
+     // Free allocated memory
     free(fileContent);
+
     printf("Sender exit.\n");
     return 0;
 }
@@ -120,12 +139,12 @@ int socketSetup(struct sockaddr_in *serverAddress, int port, char* algo, char* i
         exit(1);
     }
 
-    changeCCAlgorithm(socketfd, algo);
+    SetCCAlgorithm(socketfd, algo);
 
     return socketfd;
 }
 
-int changeCCAlgorithm(int socketfd, char* algo) {
+int SetCCAlgorithm(int socketfd, char* algo) {
     if (strcmp(algo, "reno") == 0) {
         socklen_t CC_reno_len = strlen("reno");
 
