@@ -1,8 +1,11 @@
-#include "RUDP_API.h"
+#include "RUDP.h"
 #include <stdio.h>
 
 #define MAX_RUNS 50
 
+
+
+// Structure to store statistics for each run
 struct RunStatistics {
     double time;    // Time taken for the run in milliseconds
     double speed;   // Data transfer speed in MB/s
@@ -11,91 +14,142 @@ struct RunStatistics {
 void printStatistics(struct RunStatistics* statistics, int numRuns);
 void calcTime(int fileSize, struct timeval start, struct RunStatistics* runStatistics, int numRuns);
 
-int main(int argc, char* argv[]) {
+int main(int argc,char** argv) {
+
+   // Check command line arguments
     if (argc != 3) {
-        fprintf(stderr, "Usage: %s -p <port>\n", argv[0]);
-        return EXIT_FAILURE;
+        fprintf(stderr, "Usage: %s -p <port> -algo <algorithm>\n", argv[0]);
+        exit(EXIT_FAILURE);
     }
+
+    // time statistics variables
+    struct RunStatistics runStatistics[MAX_RUNS];
+    int numRuns = 0;
+    struct timeval start;
 
     // Parse command line arguments
     int port = atoi(argv[2]);
 
-    // array for the times
-    struct RunStatistics runStatistics[MAX_RUNS];
-    int numRuns = 0;
-
-    // Create a RUDP receiver
-    RUDP_Socket* receiver_socket = rudp_socket(true, port); // Server socket
-    if (receiver_socket == NULL) {
-        perror("Error creating RUDP socket for receiver");
-        return EXIT_FAILURE;
+    
+    // Create a UDP connection between the Receiver and the Sender.
+    int receiver_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (receiver_socket == -1) {
+        printf("Could not create socket\n");
+        return -1;
     }
+
+    struct sockaddr_in receiverAddress;
+    memset((char *)&receiverAddress, 0, sizeof(receiverAddress));
+    receiverAddress.sin_family = AF_INET;
+    receiverAddress.sin_port = htons(port);
+    int ret = inet_pton(AF_INET, (const char *)DEFAULT_IP, &(receiverAddress.sin_addr));
+    if (ret <= 0) {
+        printf("inet_pton() failed\n");
+        return -1;
+    }
+
+    struct sockaddr_in senderAddress;
+    memset((char *)&senderAddress, 0, sizeof(senderAddress));
 
     printf("Starting Receiver...\n");
 
-    struct timeval start;
-    gettimeofday(&start, NULL);  // Initialize start time
-
-    // Accept incoming connection
-    if (rudp_accept(receiver_socket) == 0) {
-        perror("Error accepting connection");
-        rudp_close(receiver_socket);
-        return EXIT_FAILURE;
+    int bindResult = bind(receiver_socket, (struct sockaddr *)&receiverAddress, sizeof(receiverAddress));
+    if (bindResult == -1) {
+        close(receiver_socket);
+        return -1;
     }
 
-    int fileSize;
-    char* buffer = getBuffer(&fileSize, receiver_socket);
+    //Get a connection from the sender
+    printf("Waiting for RUDP Connection...\n");
+    int recvResult = rudp_receive(receiver_socket, &senderAddress);
+    if(recvResult<=0){return -1;}
+    printf("Sender connected, beginning to receive file...\n");
 
-    // Main loop to receive data and sender response
-    while (1) {
-        // Receive the packet using the RUDP socket
-        int recvResult = rudp_recv(receiver_socket, buffer, sizeof(buffer));
+    // Receive the file.
+    int keepReceiving = 1;
+    int measureTime=1;
+    while(keepReceiving) {
 
-        if (recvResult == -1) {
-            fprintf(stderr, "Error receiving RUDP packet\n");
-            break;
+        // count the total of bytes received
+        int totalReceived = 0;
+
+        // start measriung time
+        gettimeofday(&start,NULL);
+        while (1) {
+            
+            int receiveResult = rudp_receive(receiver_socket, &senderAddress);
+
+            // add the received data to the total sent
+            if(receiveResult > 0){totalReceived+=receiveResult;}
+            
+            // if failed return -1,
+            if (receiveResult == -1) { return -1; }
+            
+
+            // if got exitMessage break
+            else if (receiveResult == 0) {
+                keepReceiving =0;
+                break; }
+
+            //if got EOF break
+            else if (receiveResult == -2) {
+                break; }
+        }
+        
+            if (measureTime) {
+                  // data sent. calc the time it took 
+            calcTime(totalReceived, start, runStatistics, numRuns);
+            numRuns++;
+
+            // Wait for Sender response:
+            printf("Waiting for Sender response...\n");
+            int receiveChoice = rudp_receive(receiver_socket,&senderAddress);
+
+            // if no respone, exit
+            if(receiveChoice == -1){return -1;}
+
+
+            // handle case where sender wants to exit
+            if(receiveChoice == 2) {
+                printf("Sender sent exit message...\n");
+                measureTime=0;
+            }
+            // handle case where sender is sending again
+            else {
+                printf("Sender sending  again...\n");
+                totalReceived=0;
+                gettimeofday(&start, NULL);  // Reset start time for the new run
+            }
+
+            }
+
         }
 
-        // calc the time for the packet
-        calcTime(fileSize, start, runStatistics, numRuns);
-        numRuns++;
 
-        // Check for sender's decision
-        char senderDecision;
-        int decisionResult = rudp_recv(receiver_socket, &senderDecision, sizeof(char));
-
-        if (decisionResult == -1) {
-            fprintf(stderr, "Error receiving sender's decision\n");
-            break;
-        }
-
-        // Process sender's decision
-        if (senderDecision == 'E') {
-            printf("Sender wants to exit\n");
-            break;  // Exit the loop and finish
-        } else if (senderDecision == 'R') {
-            printf("Sender is sending again\n");
-        }
-    }
-
-    printf("Receiver End\n");
-
-    // Print statistics after receiving the exit message
+    
+     // Print statistics after receiving the exit message
     printf("----------------------------------\n");
     printf("- * Statistics * -\n");
-    printStatistics(runStatistics, numRuns);
+
+    for (int i = 0; i < numRuns; i++) {
+        printf("- Run #%d Data: Time=%.2fms; Speed=%.2fMB/s\n", i + 1, runStatistics[i].time, runStatistics[i].speed);
+    }
+
+    // Calculate and print averages
+    //printStatistics(runStatistics, numRuns);
+
     printf("----------------------------------\n");
 
-    // Cleanup
-    free(buffer);
-    rudp_close(receiver_socket);
-
+    // Exit and close connections
+    close(receiver_socket);
     return 0;
 }
 
+// Function to print statistics for each run
 void printStatistics(struct RunStatistics* statistics, int numRuns) {
     double totalTime = 0.0;
     double totalSpeed = 0.0;
+
     for (int i = 0; i < numRuns; i++) {
         totalTime += statistics[i].time;
         totalSpeed += statistics[i].speed;
@@ -108,27 +162,7 @@ void printStatistics(struct RunStatistics* statistics, int numRuns) {
     printf("- Average bandwidth: %.2fMB/s\n", avgSpeed);
 }
 
-// Function to dynamically allocate a buffer for the data
-char* getBuffer(int* fileSize, RUDP_Socket* receiverSocket) {
-    // Receive the file size from the sender
-    int recvSizeResult = rudp_recv(receiverSocket, fileSize, sizeof(int));
-
-    if (recvSizeResult == -1) {
-        fprintf(stderr, "Error receiving file size\n");
-        return NULL;
-    }
-
-    // Dynamically allocate a buffer for the data
-    char* buffer = (char*)malloc(*fileSize);
-    if (buffer == NULL) {
-        perror("Error allocating memory for buffer");
-        return NULL;
-    }
-
-    return buffer;
-}
-
-// Function to calculate and store statistics
+// Function to calculate time and speed for a run
 void calcTime(int fileSize, struct timeval start, struct RunStatistics* runStatistics, int numRuns) {
     struct timeval end;
     gettimeofday(&end, NULL);

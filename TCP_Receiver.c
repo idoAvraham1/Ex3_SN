@@ -118,15 +118,16 @@ int main(int argc, char *argv[]) {
         if (!BytesReceived) {
             break;
         } else if (totalReceived == fileSize) {
-            printf("File transfer completed, Received total %d bytes.\n", totalReceived);
-            printf("Waiting for sender decision...\n");
 
             // Calculate the time for the packet
             calcTime(fileSize, start, runStatistics, numRuns);
             numRuns++;
-            char exitCommand;
+
+            printf("File transfer completed, Received total %d bytes.\n", totalReceived);
 
             // Get the sender's response
+            printf("Waiting for sender decision...\n");
+            char exitCommand;
             getDataFromClient(clientSocket, &exitCommand, sizeof(char));
 
             if (exitCommand == 'E') {

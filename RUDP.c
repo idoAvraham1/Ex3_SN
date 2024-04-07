@@ -1,300 +1,250 @@
-#include "RUDP_API.h"
-#define TIMEOUT_SECONDS 2
-#define TIMEOUT_MICROSECONDS 0
-#define SOCKADDR_IN_SIZE sizeof(struct sockaddr_in)
+#include "RUDP.h"
 
 
+////********************** SENDER METHODS***********************
 
-RUDP_Socket* rudp_socket(bool isServer, unsigned short int listen_port) {
-    RUDP_Socket* socket1 = (RUDP_Socket*)malloc(sizeof(RUDP_Socket));
-    if (socket1 == NULL) {
-        perror("Error creating RUDP socket");
-        return NULL;
-    }
+/**
+ * receiveing ACK from the src
+ * return -2: timeout, -1: error, 0: disconnected, 1: Received
+ */
+int rudp_receiveACK(int socket,struct sockaddr_in* srcAddress){
+    RUDPHeader buffer;
+    memset(&buffer, 0, sizeof(RUDPHeader));
 
-    // Initialize fields
-    socket1->socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (socket1->socket_fd == -1) {
-        perror("Error creating UDP socket");
-        free(socket1);
-        return NULL;
-    }
+    socklen_t srcAddressLen = sizeof(*srcAddress);
+    int receiveACK = recvfrom(socket, &buffer, sizeof(RUDPHeader), 0, (struct sockaddr *) &srcAddress,
+                              &srcAddressLen);
 
-    // Initialize other fields
-    memset(&(socket1->dest_addr), 0, sizeof(struct sockaddr_in)); // Initialize destination address structure
-    socket1->isServer = isServer; // Set state based on the isServer parameter
-    socket1->isConnected = false; // Set initial connection state
-
-    if (isServer) {
-        // If it's a server socket, bind to the specified port
-        struct sockaddr_in server_addr;
-        memset(&server_addr, 0, sizeof(server_addr));
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        server_addr.sin_port = htons(listen_port);
-
-        if (bind(socket1->socket_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
-            perror("Error binding UDP socket");
-            close(socket1->socket_fd);
-            free(socket1);
-            return NULL;
+    if (receiveACK == -1) {
+        if (errno == EWOULDBLOCK || errno == EAGAIN) {
+            return -2;
         }
-    }
-
-    // Additional initialization as needed
-
-    return socket1;
-}
-
-    
-
-
-/*simple checksum algorithm like the Internet Checksum (RFC 1071) */
-uint16_t calculate_checksum(const void* data, size_t length) {
-    uint32_t sum = 0;
-    const uint16_t* words = (const uint16_t*)data;
-
-    // Sum all 16-bit words in the data and header
-    for (size_t i = 0; i < length / 2; ++i) {
-        sum += words[i];
-    }
-
-    // If there's an odd number of bytes, add the last byte to the sum
-    if (length % 2 != 0) {
-        sum += ((const uint8_t*)data)[length - 1];
-    }
-
-    // Fold the carry bits
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-
-    // Take the one's complement
-    uint16_t checksum = ~sum;
-
-    return checksum;
-}
-
- int rudp_send(RUDP_Socket* socket, const void* data, size_t length) {
-    if (socket == NULL || data == NULL || length == 0) {
-        return -1; // Invalid parameters
-    }
-
-    // Create an RUDPHeader 
-    RUDPHeader header;
-    header.flags = RUDP_ACK; 
-    header.length = htons(length);
-    header.checksum = 0; 
-    header.ack = 0;
-
-    // Create a buffer to hold the entire packet (header + data)
-    size_t packet_size = sizeof(RUDPHeader) + length;
-    void* packet = malloc(packet_size);
-    if (packet == NULL) {
-        perror("Error allocating memory for RUDP packet");
-        return -1;
-    }
-
-    // Copy the header and data into the packet buffer
-    memcpy(packet, &header, sizeof(RUDPHeader));
-    memcpy(packet + sizeof(RUDPHeader), data, length);
-    
-    // calc checksum by the packet and packet size
-    header.checksum = calculate_checksum(packet, packet_size);
-
-    int attempt = 0;
-    const int max_attempts = 3; // Number of retransmission attempts
-
-    while (attempt < max_attempts) {
-        // Send the packet using the RUDP socket
-        ssize_t sent_bytes = sendto(socket->socket_fd, packet, packet_size, 0,
-                            (struct sockaddr*)&(socket->dest_addr), sizeof(struct sockaddr_in));
-
-        if (sent_bytes == -1) {
-            perror("Error sending RUDP packet");
+        else{
+            printf("recvfrom() failed with error code : %d", errno);
+            close(socket);
             return -1;
         }
-
-        // Wait for acknowledgment with a timeout
-        struct timeval timeout;
-        timeout.tv_sec = TIMEOUT_SECONDS;
-        timeout.tv_usec = TIMEOUT_MICROSECONDS;
-
-        // Declare a variable of type fd_set to represent a set of file descriptors
-        fd_set readfds;
-        // Clear (initialize) the file descriptor set
-        FD_ZERO(&readfds);
-        // Add the socket file descriptor to the set
-        FD_SET(socket->socket_fd, &readfds);
-
-        // Use select to wait for the socket to become ready for reading or timeout.
-        int select_result = select(socket->socket_fd + 1, &readfds, NULL, NULL, &timeout);
-
-        if (select_result == -1) {
-            perror("Error in select");
-            return -1;
-        } 
-        else if (select_result == 0) {
-            // Timeout occurred, acknowledgment not received
-            attempt++;
-            printf("Timeout occurred, retransmitting data #%d\n", attempt);
-            continue; // Retry sending the packet
-        } 
-        else {
-            // Acknowledgment received
-            RUDPHeader ack_header;
-            ssize_t recv_bytes = recvfrom(socket->socket_fd, &ack_header, sizeof(RUDPHeader), 0, NULL, NULL);
-
-            if (recv_bytes == sizeof(RUDPHeader) && ack_header.flags == RUDP_ACK) {
-                // Handle acknowledgment processing
-                if (ack_header.ack == header.ack) {
-                    // Valid acknowledgment received
-                    printf("Data transferred successfully\n");
-                    free(packet);
-                    return 1; // Success
-                } 
-                else {
-                    // Invalid acknowledgment
-                    attempt++;
-                    printf("ACK received, but not valid, retrying #%d\n", attempt);
-                    continue; // Retry sending the packet
-                }
-            } 
-            else {
-                // Invalid or unexpected acknowledgment format
-                attempt++;
-                printf("Invalid or unexpected acknowledgment, retrying #%d\n", attempt);
-                continue; // Retry sending the packet
-            }
-        }
     }
-    free(packet);
-    // Maximum attempts reached, consider it a failure
-    printf("Maximum attempts reached, data transfer failed\n");
+    if(receiveACK == 0){
+        return 0;
+    }
+
+    if(buffer.flags == ACK_FLAG){
+        return 1;
+    }
     return 0;
 }
 
+/**
+ *  request connect and waits for ACK
+ * @return -1: error, 0: disconnected, 1: received
+ */
+int rudp_connect(int socket,struct sockaddr_in* destAddress,struct sockaddr_in* srcAddress){
+    
+    // create connect header 
+    RUDPHeader SYN;
+    memset(&SYN,0,sizeof(RUDPHeader));
+    SYN.length=0;
+    strcpy(SYN.data,"");
+    SYN.checksum = 0;
+    SYN.flags = SYN_FLAG;
 
+    // while didnt get ack and timeout occured send again
+    while(1) {
 
+        int sendSYN = sendto(socket, &SYN, sizeof(RUDPHeader), 0, (struct sockaddr *) destAddress, sizeof(*destAddress));
+        if (sendSYN == -1) {
+            printf("sendto() failed with error code  : %d", errno);
+            close(socket);
+            return -1;
+        }
 
- int rudp_recv(RUDP_Socket* socket, void* buffer, size_t buffer_size) {
-    if (socket == NULL || buffer == NULL || buffer_size == 0) {
-        return -1; // Invalid parameters
+        int ACKresult = rudp_receiveACK(socket, srcAddress);
+        if (ACKresult != -2) {
+            return ACKresult;
+        }
+
+        printf("Timeout occurred, sending connect again\n");
     }
+}
+/**
+ * send disconnect and wait for ack, if not sent send again
+ * @param socket
+ * @param destAddress
+ * @param srcAddress
+ * @return -1: error, 0: disconnected, 1: received
+ */
+int rudp_disconnect(int socket,struct sockaddr_in* destAddress,struct sockaddr_in* srcAddress){
 
-    // Receive the packet using the RUDP socket
-    RUDPHeader received_header;
-    ssize_t recv_bytes = recvfrom(socket->socket_fd, &received_header, sizeof(RUDPHeader), 0, NULL, NULL);
+    // Create disconnect header
+    RUDPHeader FIN;
+    memset(&FIN,0,sizeof(RUDPHeader));
+    FIN.length=0;
+    strcpy(FIN.data,"");
+    FIN.checksum = 0;
+    FIN.flags = FIN_FLAG;
 
-    if (recv_bytes == -1) {
-        perror("Error receiving RUDP packet");
+    // while didnt get ack send again
+    while (1) {
+
+        int sendFIN = sendto(socket, &FIN, sizeof(RUDPHeader), 0, (struct sockaddr *) destAddress, sizeof(*destAddress));
+        if (sendFIN == -1) {
+            printf("sendto() failed with error code  : %d\n", errno);
+            close(socket);
+            return -1;
+        }
+        int ACKresult = rudp_receiveACK(socket, srcAddress);
+        if (ACKresult != -2) {
+            return ACKresult;
+        }
+
+        printf("Timeout occurred, sending disconnect again\n");
+    }
+}
+
+
+/**
+ * Send the data and waits for ACK, if didnt get any, send again
+ * @return -1: failure, 1: successful, 0: sender closed
+ */
+int rudp_sendDataPacket(int socket,char* data,struct sockaddr_in* destAddress,struct sockaddr_in* srcAddress){
+    // Create a data message
+    RUDPHeader Data;
+    memset(&Data,0,sizeof(RUDPHeader));
+    Data.length = sizeof(char)* strlen(data);
+    strcpy(Data.data,data);
+    Data.checksum = calculate_checksum(Data.data,Data.length);
+    Data.flags = DATA_FLAG;
+    
+    // while didnt get ack and timeout occured send again
+   while(1) {
+
+       int sendData = sendto(socket, &Data, sizeof(RUDPHeader), 0, 
+       (struct sockaddr *) destAddress, sizeof(*destAddress));
+
+       if (sendData < 0) {
+           printf("sendto() failed with error code  : %d\n", errno);
+           return -1;
+       }
+
+       int ACKresult = rudp_receiveACK(socket,srcAddress);
+
+       if(ACKresult != -2) {
+           return ACKresult;
+       }
+
+       printf("Timeout occurred, sending file again\n");
+   }
+}
+
+
+
+
+
+//********************** RECEIVER METHODS***********************
+
+
+
+/**
+ * function that sends ACK to destAddress
+ * @param socket
+ * @param destAddress
+ * @return -1: failed\n 1: successful
+ */
+int rudp_sendACK(int socket,struct sockaddr_in* destAddress){
+    // Create a ACK message and send it
+    RUDPHeader ACK;
+    memset(&ACK,0,sizeof(RUDPHeader));
+    ACK.length=0;
+    strcpy(ACK.data,"");
+    ACK.checksum = 0;
+    ACK.flags = ACK_FLAG;
+    int sendACK = sendto(socket, &ACK, sizeof(RUDPHeader), 0, (struct sockaddr *)destAddress, sizeof(*destAddress));
+    if (sendACK == -1) {
+        printf("sendto() failed with error code  : %d\n", errno);
+        return -1;
+    }
+    return 1;
+}
+
+/**
+ * recieve the data from the sender and sends ACK
+ * @return -1: failure, 0: exit message, -2: EOF, -3:bad packet >0:Data
+ */
+int rudp_receive(int socket,struct sockaddr_in* senderAddress){
+    RUDPHeader buffer;
+    memset(&buffer,0,sizeof(RUDPHeader));
+
+    // Recieve Data from sender
+    socklen_t senderAddressLen = sizeof(*senderAddress);
+    int recvData = recvfrom(socket, &buffer, sizeof(buffer), 0, (struct sockaddr *)senderAddress,&senderAddressLen);
+    if (recvData < 0){
+        printf("recvfrom() failed with error code : %d", errno);
+        close(socket);
         return -1;
     }
 
-    // Check if the received packet is an acknowledgment
-    if (received_header.flags == RUDP_ACK) {
+    int ACKResult;
+    //Analyze data from sender
+    switch (buffer.flags) {
+        
+        // if SYN save client IP and send ACK
+        case SYN_FLAG:
+            printf("Connection request received, sending ACK.\n");
+            char clientIPAddrReadable[32] = {'\0'};
+            inet_ntop(AF_INET, &senderAddress->sin_addr, clientIPAddrReadable, sizeof(clientIPAddrReadable));
+            ACKResult = rudp_sendACK(socket,senderAddress);
+            if(ACKResult < 0){return -1;}
+            return 1;
 
-        return 1; // Success (acknowledgment received)
-    } 
-    else if (received_header.flags == RUDP_DATA) {
-        // Received data packet
-        size_t data_length = ntohs(received_header.length);
+        // if FIN send ACK
+        case FIN_FLAG:
+            ACKResult = rudp_sendACK(socket,senderAddress);
+            if(ACKResult < 0){return -1;}
+            printf("ACK Sent. Exiting...\n");
+            return 0;
 
-        // Check if the buffer size is sufficient
-        if (data_length > buffer_size) {
-            fprintf(stderr, "Buffer size is not sufficient for received data. Expected size: %zu\n", data_length);
-            return -1;
-        }
-
-        // Receive the actual data
-        recv_bytes = recvfrom(socket->socket_fd, buffer, data_length, 0, NULL, NULL);
-
-        if (recv_bytes == -1) {
-            perror("Error receiving RUDP data");
-            return -1;
-        }
-
-        // Verify the checksum of the received data
-        uint16_t received_checksum = calculate_checksum(buffer, data_length);
-
-        if (received_checksum != received_header.checksum) {
-            fprintf(stderr, "Checksum verification failed. Discarding the received data.\n");
-            return -1;
-        }
-
-        // Send acknowledgment for the received data
-        RUDPHeader ack_header;
-        ack_header.flags = RUDP_ACK;
-        ack_header.ack = received_header.ack; // Use received acknowledgment number as the acknowledgment for the data packet
-        ack_header.length = 0;
-
-        ssize_t sent_bytes = sendto(socket->socket_fd, &ack_header, sizeof(RUDPHeader), 0,
-                                    (struct sockaddr*)&(socket->dest_addr), sizeof(struct sockaddr_in));
-
-        if (sent_bytes == -1) {
-            perror("Error sending acknowledgment");
-            return -1;
-        }
-
-        return 1; // Success (data received, checksum verified, and acknowledgment sent)
-    } 
-    else {
-        // Invalid or unexpected packet format
-        fprintf(stderr, "Invalid or unexpected packet format\n");
-        return -1;
+        // if Message check checksum, return ACK if checksum is not OK dont send ack,
+        // return -2 if got EOF 
+        case DATA_FLAG:
+            if(buffer.checksum == calculate_checksum(buffer.data,buffer.length)){
+                ACKResult = rudp_sendACK(socket,senderAddress);
+                if(ACKResult < 0){return -1;}
+                if(buffer.data[0]==EOF){
+                    printf("File transfer completed.\n");
+                    printf("ACK Sent.\n");
+                    return -2;
+                }
+                // if not EOF send the bytes received
+                return buffer.length;
+            }
+            else{
+                printf(" something wrong with the packet, sending ACK\n");
+                return -3;
+            }
     }
+    return -1;
 }
 
-
-
-
- void rudp_close(RUDP_Socket* socket) {
-    if (socket == NULL) {
-        // Handle invalid socket
-        return;
+/* 
+*   A checksum function that returns 16 bit checksum for data.
+*   This function is taken from RFC1071, can be found here:
+*   https://tools.ietf.org/html/rfc1071
+*
+*/
+unsigned short int calculate_checksum(void *data, unsigned int bytes) {
+    unsigned short int *data_pointer = (unsigned short int *)data;
+    unsigned int total_sum = 0;
+// Main summing loop
+    while (bytes > 1) {
+        total_sum += *data_pointer++;
+        bytes -= 2;
     }
-    // Close the socket
-    close(socket->socket_fd);
-    // Free the memory allocated for the socket
-    free(socket);
-}
-
-
-
-int rudp_connect(RUDP_Socket *sockfd, const char *dest_ip, unsigned short int dest_port) {
-    if (sockfd == NULL || dest_ip == NULL) {
-        return 0; // Invalid parameters
-    }
-
-    if (sockfd->isConnected || sockfd->isServer) {
-        return 0; // Socket is already connected or set to server
-    }
-
-    // Initialize the destination address
-    memset(&(sockfd->dest_addr), 0, sizeof(struct sockaddr_in));
-    sockfd->dest_addr.sin_family = AF_INET;
-    sockfd->dest_addr.sin_port = htons(dest_port);
-
-    // Convert IP address to binary form
-    if (inet_pton(AF_INET, dest_ip, &(sockfd->dest_addr.sin_addr)) <= 0) {
-        perror("Invalid IP address");
-        return 0; // Failure
-    }
-
-    sockfd->isConnected = true;
-    return 1; // Success
-}
-
-int rudp_accept(RUDP_Socket *sockfd) {
-    if (sockfd == NULL) {
-        return 0; // Invalid parameter
-    }
-
-    if (sockfd->isConnected || !sockfd->isServer) {
-        return 0; // Socket is already connected or not set to server
-    }
-
-    // Accept the incoming connection
-    sockfd->isConnected = true;
-    return 1; // Success
+// Add left-over byte, if any
+    if (bytes > 0)
+        total_sum += *((unsigned char *)data_pointer);
+// Fold 32-bit sum to 16 bits
+    while (total_sum >> 16)
+        total_sum = (total_sum & 0xFFFF) + (total_sum >> 16);
+    return (~((unsigned short int)total_sum));
 }
